@@ -46,13 +46,13 @@ def receive_framed_packet(sock):
 
 
 
-def run_forwarding_loop(tun_fd, tls_socket):
+def forward_traffic(tun_fd, tls_socket):
     watched = [tun_fd, tls_socket]
 
     while True:
-        ready_to_read, _, _ = select.select(watched, [], [])
+        ready, _, _ = select.select(watched, [], [])
 
-        for fd in ready_to_read:
+        for fd in ready:
 
             if fd == tun_fd:
                 packet = os.read(tun_fd, 2048)
@@ -74,47 +74,33 @@ def run_forwarding_loop(tun_fd, tls_socket):
 
 
 
-def build_tls_context(cafile, certfile, keyfile, server_hostname, insecure):
+def tls_conf(ca_public, client_cert, client_private):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
-    if insecure:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        print("[!] Certificate verification disabled (--insecure)")
-    else:
    
-        ctx.load_verify_locations(cafile=cafile)
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        ctx.check_hostname = bool(server_hostname)
+    ctx.load_verify_locations(cafile=ca_public)
+    ctx.verify_mode = ssl.CERT_REQUIRED
 
-    if certfile:
-        ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
-
-    keylog_path = os.environ.get("SSLKEYLOGFILE")
-    if keylog_path:
-        ctx.keylog_filename = keylog_path
+    if client_cert: #Mutual TLS
+        ctx.load_cert_chain(certfile=client_cert, keyfile=client_private)
+        print("[+] Mutual TLS enabled")
 
     return ctx
 
 
 def main():
     parser = argparse.ArgumentParser(description="TLS VPN client")
-    parser.add_argument("server_ip")
+    parser.add_argument("--server_ip", default="10.0.2.15")
     parser.add_argument("--port", type=int, default=55555)
     parser.add_argument("--tun-name", default="tun0")
     parser.add_argument("--tun-ip", default="192.168.53.5")
-    parser.add_argument("--cafile", default="ca-cert.pem")
-    parser.add_argument("--certfile", default=None,
-                         help="Client cert, only needed for mutual TLS")
-    parser.add_argument("--keyfile", default=None)
-    parser.add_argument("--server-hostname", default=None,
-                         help="Name expected on the server's certificate")
-    parser.add_argument("--insecure", action="store_true",
-                         help="Skip all cert verification (debugging only)")
+    parser.add_argument("--ca_public", default="ca-public.pem")
+    parser.add_argument("--client_cert", default=None)
+    parser.add_argument("--client_private", default=None)
     args = parser.parse_args()
 
     if os.geteuid() != 0:
-        sys.exit("Must run as root (needed for /dev/net/tun and ip commands)")
+        sys.exit("Must run as root")
 
     # --- set up the virtual network interface ---
     tun_fd = open_tun_device(args.tun_name)
@@ -122,21 +108,16 @@ def main():
     print(f"[+] {args.tun_name} up with {args.tun_ip}")
 
     # --- set up TLS and connect ---
-    tls_context = build_tls_context(
-        args.cafile, args.certfile, args.keyfile,
-        args.server_hostname, args.insecure,
-    )
+    conf = tls_conf(args.ca_public, args.client_cert, args.client_private)
 
     plain_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     plain_socket.connect((args.server_ip, args.port))
 
-    tls_socket = tls_context.wrap_socket(
-        plain_socket, server_hostname=args.server_hostname
-    )
+    tls_socket = conf.wrap_socket(plain_socket)
     print(f"[+] TLS handshake complete ({tls_socket.version()})")
     print(f"[+] Negotiated cipher: {tls_socket.cipher()}")
 
-    run_forwarding_loop(tun_fd, tls_socket)
+    forward_traffic(tun_fd, tls_socket)
 
 
 if __name__ == "__main__":

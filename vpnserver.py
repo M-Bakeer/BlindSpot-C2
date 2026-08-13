@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-Usage:
-    sudo python3 vpnserver.py --tun-ip 192.168.53.1 --certfile server-cert.pem --keyfile server-key.pem
-"""
 
 import argparse
 import fcntl
@@ -11,15 +7,10 @@ import select
 import socket
 import ssl
 import struct
-import sys
-
-
-                          
-                         
+import sys                                           
 
 
 def open_tun_device(name):
-
     tun_fd = os.open("/dev/net/tun", os.O_RDWR)
 
     request = struct.pack("16sH", name.encode(), 0x0001 | 0x1000)
@@ -59,13 +50,13 @@ def receive_framed_packet(sock):
     return read_exact(sock, length)
 
 
-def run_forwarding_loop(tun_fd, tls_socket):
+def forward_traffic(tun_fd, tls_socket):
     watched = [tun_fd, tls_socket]
 
     while True:
-        ready_to_read, _, _ = select.select(watched, [], [])
+        ready, _, _ = select.select(watched, [], [])
 
-        for fd in ready_to_read:
+        for fd in ready:
 
             if fd == tun_fd:
                 # into the tunnel -> encrypt and send it out.
@@ -88,22 +79,17 @@ def run_forwarding_loop(tun_fd, tls_socket):
                 os.write(tun_fd, packet)
 
 
-def build_tls_context(certfile, keyfile, cafile):
+def tls_conf(server_cert, server_private, ca_public):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 
-    ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+    ctx.load_cert_chain(certfile=server_cert, keyfile=server_private)
 
-
-    if cafile:
-        ctx.load_verify_locations(cafile=cafile)
+    if ca_public: #Mutual TLS
+        ctx.load_verify_locations(cafile=ca_public)
         ctx.verify_mode = ssl.CERT_REQUIRED
+        print("[+] Mutual TLS enabled")
     else:
         ctx.verify_mode = ssl.CERT_NONE
-
-
-    keylog_path = os.environ.get("SSLKEYLOGFILE")
-    if keylog_path:
-        ctx.keylog_filename = keylog_path
 
     return ctx
 
@@ -113,14 +99,13 @@ def main():
     parser.add_argument("--port", type=int, default=55555)
     parser.add_argument("--tun-name", default="tun0")
     parser.add_argument("--tun-ip", default="192.168.53.1")
-    parser.add_argument("--certfile", default="server-cert.pem")
-    parser.add_argument("--keyfile", default="server-key.pem")
-    parser.add_argument("--cafile", default=None,
-                         help="CA file to require+verify client certs (mutual TLS)")
+    parser.add_argument("--server-cert", default="server-cert.pem")
+    parser.add_argument("--server-private", default="server-private.pem")
+    parser.add_argument("--ca-public", default=None, help="CA file to require+verify client certs (mutual TLS)")
     args = parser.parse_args()
 
-    if os.geteuid() != 0:
-        sys.exit("Must run as root (needed for /dev/net/tun and ip commands)")
+    if os.geteuid() != 0: #check root
+        sys.exit("Must run as root")
 
     # --- set up the virtual network interface ---
     tun_fd = open_tun_device(args.tun_name)
@@ -128,7 +113,7 @@ def main():
     print(f"[+] {args.tun_name} up with {args.tun_ip}")
 
     # --- set up TLS ---
-    tls_context = build_tls_context(args.certfile, args.keyfile, args.cafile)
+    conf = tls_conf(args.server_cert, args.server_private, args.ca_public)
 
     # --- listen for a client connection ---
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -142,7 +127,7 @@ def main():
         print(f"[+] Connection from {addr}")
 
         try:
-            tls_socket = tls_context.wrap_socket(plain_socket, server_side=True)
+            tls_socket = conf.wrap_socket(plain_socket, server_side=True)
         except ssl.SSLError as e:
             print(f"[-] TLS handshake failed: {e}")
             plain_socket.close()
@@ -151,7 +136,7 @@ def main():
         print(f"[+] TLS handshake complete ({tls_socket.version()})")
         print(f"[+] Negotiated cipher: {tls_socket.cipher()}")
         try:
-            run_forwarding_loop(tun_fd, tls_socket)
+            forward_traffic(tun_fd, tls_socket)
         finally:
             print("[-] Client disconnected, waiting for new connection")
             tls_socket.close()
