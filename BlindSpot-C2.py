@@ -9,7 +9,6 @@ import base64
 import random
 import sys
 import time
-
 import requests
 
 DOH_URL = "https://cloudflare-dns.com/dns-query"
@@ -175,7 +174,7 @@ def main():
             print(f"       -> C2 IP: {', '.join(result['answers'])}")
 
         if args.jitter:
-            time.sleep(random.uniform(0.5, 2.0))
+            time.sleep(random.uniform(0.5, 3.0))
 
 
     print()
